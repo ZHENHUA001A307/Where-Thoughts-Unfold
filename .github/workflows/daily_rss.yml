@@ -1,0 +1,110 @@
+name: EPUB to RSS Pusher
+
+on:
+  schedule:
+    - cron: '0 0 */3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: pip install ebooklib beautifulsoup4 lxml
+
+      - name: Run Script
+        run: |
+          python <<EOF
+          import os
+          import datetime
+          import ebooklib
+          from ebooklib import epub
+          from bs4 import BeautifulSoup
+
+          # 1. 读取进度数字
+          try:
+              with open('progress.txt', 'r') as f:
+                  content = f.read().strip()
+                  print(f"DEBUG: progress.txt 内容是 '{content}'")
+                  current_index = int(content)
+          except Exception as e:
+              print(f"DEBUG: 读取 progress.txt 失败: {e}")
+              current_index = 1
+
+          # 2. 扫描文件夹 (调试重点)
+          search_str = f"{current_index:0>3}"
+          print(f"DEBUG: 正在寻找包含序号 '{search_str}' 的文件...")
+          
+          target_file = None
+          if not os.path.exists('books'):
+              print("DEBUG: 错误！找不到名为 'books' 的文件夹。")
+              # 打印当前目录下有什么，帮用户排查
+              print(f"DEBUG: 当前目录下的文件有: {os.listdir('.')}")
+          else:
+              all_files = os.listdir('books')
+              print(f"DEBUG: 'books' 文件夹内的文件列表: {all_files}")
+              for f in all_files:
+                  if search_str in f and f.lower().endswith('.epub'):
+                      target_file = os.path.join('books', f)
+                      break
+
+          if not target_file:
+              print(f"DEBUG: 匹配失败。没找到包含 '{search_str}' 的 epub 文件。")
+              exit(1)
+
+          print(f"DEBUG: 成功匹配到文件: {target_file}")
+
+          # 3. 解析 EPUB
+          book = epub.read_epub(target_file)
+          content_html = ""
+          for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+              soup = BeautifulSoup(item.get_content(), 'html.parser')
+              for img in soup.find_all('img'):
+                  img.decompose()
+              body = soup.find('body')
+              if body:
+                  content_html += "".join([str(c) for c in body.contents])
+
+          # 4. 生成 RSS
+          pub_date = datetime.datetime.now().strftime('%a, %d %b %Y %H:%M:%S +0000')
+          rss_feed = f"""<?xml version="1.0" encoding="UTF-8" ?>
+          <rss version="2.0">
+          <channel>
+              <title>我的每日小说</title>
+              <link>https://github.com/${{ github.repository }}</link>
+              <item>
+                  <title>{os.path.basename(target_file)}</title>
+                  <description><![CDATA[{content_html}]]></description>
+                  <pubDate>{pub_date}</pubDate>
+                  <guid>{current_index}</guid>
+              </item>
+          </channel>
+          </rss>"""
+
+          with open('feed.xml', 'w', encoding='utf-8') as f:
+              f.write(rss_feed)
+
+          # 5. 更新进度
+          with open('progress.txt', 'w') as f:
+              f.write(str(current_index + 1))
+          print("DEBUG: 任务完成，进度已更新。")
+          EOF
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add feed.xml progress.txt
+          git commit -m "Update RSS: Sent chapter $(cat progress.txt)" || echo "Nothing to commit"
+          git push
